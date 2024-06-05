@@ -7,9 +7,8 @@ import {
 } from "@/lib/constants";
 import db from "@/lib/db";
 import { z } from "zod";
-import { getIronSession } from "iron-session";
-import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import getSession from "@/lib/session";
 
 const checkUsername = (username: string) => !username.includes("potato");
 
@@ -21,35 +20,6 @@ const checkPasswords = ({
   confirm_password: string;
 }) => password === confirm_password;
 
-const checkUniqueUsername = async (username: string) => {
-  const user = await db.user.findUnique({
-    where: {
-      username,
-    },
-    select: {
-      id: true,
-    },
-  });
-  // if (user) {
-  //   return false;
-  // } else {
-  //   return true;
-  // }
-  return !Boolean(user);
-};
-
-const checkUniqueEmail = async (email: string) => {
-  const user = await db.user.findUnique({
-    where: {
-      email,
-    },
-    select: {
-      id: true,
-    },
-  });
-  return Boolean(user) === false;
-};
-
 const formSchema = z
   .object({
     username: z
@@ -60,16 +30,8 @@ const formSchema = z
       .toLowerCase()
       .trim()
       // .transform((username) => `🔥 ${username} 🔥`)
-      .refine(checkUsername, "No potatoes allowed!")
-      .refine(checkUniqueUsername, "This username is already taken"),
-    email: z
-      .string()
-      .email()
-      .toLowerCase()
-      .refine(
-        checkUniqueEmail,
-        "There is an account already registered with that email."
-      ),
+      .refine(checkUsername, "No potatoes allowed!"),
+    email: z.string().email().toLowerCase(),
     password: z
       .string()
       .min(PASSWORD_MIN_LENGTH)
@@ -78,6 +40,44 @@ const formSchema = z
       .string()
       .min(PASSWORD_MIN_LENGTH)
       .regex(PASSWORD_REGEX, PASSWORD_REGEX_ERROR),
+  })
+  .superRefine(async ({ username }, ctx) => {
+    const user = await db.user.findUnique({
+      where: {
+        username,
+      },
+      select: {
+        id: true,
+      },
+    });
+    if (user) {
+      ctx.addIssue({
+        code: "custom",
+        message: "This username is already taken",
+        path: ["username"],
+        fatal: true,
+      });
+      return z.NEVER;
+    }
+  })
+  .superRefine(async ({ email }, ctx) => {
+    const user = await db.user.findUnique({
+      where: {
+        email,
+      },
+      select: {
+        id: true,
+      },
+    });
+    if (user) {
+      ctx.addIssue({
+        code: "custom",
+        message: "This email is already taken",
+        path: ["email"],
+        fatal: true,
+      });
+      return z.NEVER;
+    }
   })
   .refine(checkPasswords, {
     message: "Both passwords should be the same!",
@@ -91,8 +91,9 @@ export async function createAccount(prevState: any, formData: FormData) {
     password: formData.get("password"),
     confirm_password: formData.get("confirm_password"),
   };
-  const result = await formSchema.safeParseAsync(data);
+  const result = await formSchema.spa(data);
   if (!result.success) {
+    console.log(result.error.flatten());
     return result.error.flatten();
   } else {
     // hash password
@@ -110,13 +111,9 @@ export async function createAccount(prevState: any, formData: FormData) {
         id: true,
       },
     });
-    const cookie = await getIronSession(cookies(), {
-      cookieName: "delicious-karrot",
-      password: process.env.COOKIE_PASSWORD!,
-    });
-    //@ts-ignore
-    cookie.id = user.id;
-    await cookie.save();
+    const session = await getSession();
+    session.id = user.id;
+    await session.save();
     redirect("/profile");
   }
 }
